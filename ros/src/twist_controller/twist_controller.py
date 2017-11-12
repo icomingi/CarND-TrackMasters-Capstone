@@ -51,12 +51,12 @@ class Controller(object):
         # acceleration
         if velocity_change > 0:
             throttle = self.throttle_lowpass.filt(velocity_change)
-            throttle < throttle if throttle > self.accel_deadband else 0.0
+            throttle = throttle if throttle > self.accel_deadband else 0.0
 
         # brake
         else:
             brake = self.brake_lowpass.filt(-velocity_change)
-            brake < brake if brake > self.brake_deadband else 0.0
+            brake = brake if brake > self.brake_deadband else 0.0
             
 
         # steering
