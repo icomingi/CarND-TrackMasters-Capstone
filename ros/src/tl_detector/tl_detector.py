@@ -12,6 +12,8 @@ import cv2
 import yaml
 import math
 
+import time
+
 STATE_COUNT_THRESHOLD = 3
 
 class TLDetector(object):
@@ -156,25 +158,35 @@ class TLDetector(object):
 
         # List of positions that correspond to the line to stop in front of for a given intersection
         stop_line_positions = self.config['stop_line_positions']
+        rospy.loginfo(stop_line_positions)
         car_wp_index = 0
         if(self.pose):
             car_wp_index = self.get_closest_waypoint(self.pose.pose)
 
         light = None
         light_wp_index = 0
+        #rospy.loginfo(self.lights)
         for l in self.lights:
             light_wp_index = self.get_closest_waypoint(l.pose.pose)
             index_diff = light_wp_index - car_wp_index
+            rospy.loginfo("index_diff: %d", index_diff)
             # TODO: index_diff represents the distance between the light wp and car wp, this value needs to be tuned to determine 'visibility' of traffic light
             # light is ahead of car and within a visible distance
             if index_diff > 0: #and index_diff < 200:
                 light = l
                 break
+        
+        # Need to find waypoint index of stop line before traffic light
 
         if light:
+            t0 = time.time()
             state = self.get_light_state(light)
-            return light_wp_index, state
-        self.waypoints = []
+            t1 = time.time()
+            rospy.loginfo("State classification took {:.5f} seconds".format(t1-t0))
+            rospy.loginfo("Detected light at %d", light_wp_index)
+            rospy.loginfo(state)
+            return light_wp_index, TrafficLight.RED
+        #self.waypoints = []
         return -1, TrafficLight.UNKNOWN
 
 
