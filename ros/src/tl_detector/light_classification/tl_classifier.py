@@ -26,6 +26,10 @@ class TLClassifier(object):
         # load weights
         self.model.load_weights(self._work_dir+self._model_name+'.h5')
 
+        # freeze layers to avoid being trainable
+        for l in self.model.layers:
+        	l.trainable = False
+
         # compile forward pass
         self.fp = K.function([self.model.layers[0].input, K.learning_phase()], [self.model.layers[-1].output])
         

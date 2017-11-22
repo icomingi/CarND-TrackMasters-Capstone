@@ -14,6 +14,9 @@ import math
 import scipy
 import time
 
+import numpy as np
+from scipy.misc import imresize
+
 STATE_COUNT_THRESHOLD = 3
 
 
@@ -22,8 +25,9 @@ class TLDetector(object):
         rospy.init_node('tl_detector')
 
         # AK debug:
-        #self.counter = 0
-        #self.test_img_dir = './test_imgs/'#'/home/student/Desktop/shared/'
+        self.save_images_for_debugging = False
+        self.counter = 0
+        self.test_img_dir = './test_imgs/'#'/home/student/Desktop/shared/'
         #
 
         self.pose = None
@@ -58,6 +62,10 @@ class TLDetector(object):
         self.last_wp = -1
         self.state_count = 0
 
+        # Add coefficients from regression
+        self.y_estimator = np.poly1d(np.array([-8603.39023981, 572.75655132]))
+        self.height_estimator = np.poly1d(np.array([2978.60361045, 24.61502163]))
+
         rospy.spin()
 
 
@@ -87,6 +95,8 @@ class TLDetector(object):
         self.camera_image = msg
         light_wp, state = self.process_traffic_lights()
 
+        # AK rospy.loginfo('light-waypoint: {}, state: {}'.format(light_wp, state))
+
         '''
         Publish upcoming red lights at camera frequency.
         Each predicted state has to occur `STATE_COUNT_THRESHOLD` number
@@ -96,6 +106,8 @@ class TLDetector(object):
         if self.state != state:
             self.state_count = 0
             self.state = state
+            # state change, but we still need to publish the last wp
+            self.upcoming_red_light_pub.publish(Int32(self.last_wp))
         elif self.state_count >= STATE_COUNT_THRESHOLD:
             self.last_state = self.state
             light_wp = light_wp if state == TrafficLight.RED else -1
@@ -148,20 +160,25 @@ class TLDetector(object):
 
         cv_image = self.bridge.imgmsg_to_cv2(self.camera_image, "rgb8")
         
-        # AK debug
-        #scipy.misc.imsave(self.test_img_dir+'{:04d}'.format(self.counter)+'.png', cv_image)
-        #self.counter += 1
-
         #Get classification
         distance = self.distance_to_light(light)
-        if distance < 200:
+        if distance < 60:
             # light could be visible in the camera image
-            cc = self.crop_window(light, cv_image.shape)
-            cropped_img = cv_image[cc[0][0]:cc[1][0],cc[0][1]:cc[1][1],:]
+            cropped_img = self.crop_window(distance, cv_image)
+            #cropped_img = cv_image[cc[0][0]:cc[1][0],cc[0][1]:cc[1][1],:]
             
             # TODO: 
             # once crop_window is implemented properly, pass the properly cropped and resized image to the classifier
-            pred =  self.light_classifier.get_classification(cv_image)
+            actual_pred = light.state
+            pred =  self.light_classifier.get_classification(cropped_img)
+            
+            # AK debug
+            if self.save_images_for_debugging:
+                scipy.misc.imsave(self.test_img_dir+'{:04d}-{}-{:.0f}'.format(self.counter,pred,distance)+'.png', cropped_img)
+                self.counter += 1
+
+
+
             return pred
         else:
             # light is not visible in the camera image
@@ -213,21 +230,25 @@ class TLDetector(object):
             return 1000
 
 
-    def crop_window(self, light, img_shape):
+    def crop_window(self, distance, cv_image):
         '''
         TODO: This is a placeholder only.
         properly identify the crop window around the next traffic lisght 
         '''
-        if (self.pose):
-            d = self.distance_to_light(light)
-            start_x = int(round(1e-5*(d**3)-0.0086*(d**2)+2.2212*(d)+381.62))
-            start_x = max(start_x, 0)
-            end_x = int(round(1e-5*(d**3)-0.0067*(d**2)+1.4585*(d)+492.27))
-            end_x = min(end_x, img_shape[0])
-            return ((start_x, 0), (end_x, img_shape[1]))
+        height, width = cv_image.shape[:2]
+        if distance < 15.:
+            return cv_image[:height//2, :, :]
         else:
-            return ((0, 64), (0, 64))
-
+            y_est, h_est = int(self.y_estimator(1./distance)), int(self.height_estimator(1./distance))
+            y_min = int(min(height, max(0, y_est - int(h_est*.8))*0.9))
+            y_max = int(min(height, max(0, y_est + int(h_est*1.3))*1.1))
+            sliced_img = cv_image[y_min:y_max, :, :]
+            delta_y = y_max - y_min
+            # scale = 2 if delta_y < 128 else 1
+            scale =1 
+            ratio = 1.*width/delta_y
+            resized_img = imresize(sliced_img, (64*scale, int(64*ratio*scale)), "nearest")
+            return resized_img
 
     def process_traffic_lights(self):
         """Finds closest visible traffic light, if one exists, and determines its
@@ -261,7 +282,10 @@ class TLDetector(object):
                 break
 
         if light:
+            #Debug, to see how much time the classifie took to process one image
+            #t0 = time.time()
             state = self.get_light_state(light)
+            #rospy.loginfo("Light detection took {:.2f}s".format(time.time()-t0))
             return stop_line_wp_index, state
         #self.waypoints = []
         return -1, TrafficLight.UNKNOWN

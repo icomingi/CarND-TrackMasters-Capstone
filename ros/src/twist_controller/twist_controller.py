@@ -25,8 +25,8 @@ class Controller(object):
         self.max_steer_angle = max_steer_angle
         self.last_time = None
         self.steer_lowpass = LowPassFilter(0.96, 1.) # from https://discussions.udacity.com/t/solved-compute-cte-without-car-position/364383/8
-        self.throttle_lowpass = LowPassFilter(0.05, 0.01) # acceleration should do something intelligent with max accle&dec mass etc
-        self.brake_lowpass = LowPassFilter(0.05, 0.01) # deccelaration
+        self.throttle_lowpass = LowPassFilter(1., 3.) # acceleration should do something intelligent with max accle&dec mass etc
+        self.brake_lowpass = LowPassFilter(1., 3.) # deccelaration
         self.yawController = YawController(wheel_base,steer_ratio, ONE_MPH, max_lat_accel, max_steer_angle)
 
 
@@ -63,6 +63,12 @@ class Controller(object):
         # steering
         steer = self.yawController.get_steering(proposed_velocity, proposed_angular, current_velocity)
         steer = self.steer_lowpass.filt(steer)
+
+        # Add case for stopping at red light
+        if abs(proposed_velocity) < 0.001:
+            throttle = 0.
+            brake = 400.0 #.1
+        #    steer = 0.
 
         self.last_time = time.time()
 

@@ -58,8 +58,9 @@ class WaypointUpdater(object):
         # Add a member variable to store index of next waypoints
         #self.next_wp_index = None
 
-        self.last_redlight_id = None
+        self.last_stop_id = -1
         self.deceleration_set = False
+        self.acceleration_set = False
 
         rospy.spin()
 
@@ -118,8 +119,8 @@ class WaypointUpdater(object):
             diff_heading = abs(yaw - heading)
             if diff_heading > math.pi/4:
                 closest_wp_index = closest_wp_index + 1
-        
-        return closest_wp_index
+        # Fix bug closest_wp_index out of index
+        return closest_wp_index % len(self.base_waypoints)
 
     def yaw_from_quaternion(self, pose):
         return tf.transformations.euler_from_quaternion((pose.orientation.x, 
@@ -132,62 +133,116 @@ class WaypointUpdater(object):
 
     def traffic_cb(self, msg):
         # TODO: Callback for /traffic_waypoint message. Implement
-        # Get stopline index stop_id
         stop_id = msg.data
-        if (stop_id != self.last_redlight_id):
-            self.last_redlight_id = stop_id
+        # AK rospy.loginfo('stop_id: {} - last_stop_id: {}'.format(stop_id, self.last_stop_id))
+        if (stop_id > self.last_stop_id):
+            # Change to red light
+            self.last_stop_id = stop_id
             self.deceleration_set = False
-        # If there is a red light in the final waypoints list
-        id_diff = stop_id - self.next_wp_index
-        if id_diff >= 0 and id_diff < LOOKAHEAD_WPS and not self.deceleration_set:
-            # Calculate distance till next red light
-            total_dist = self.distance(self.base_waypoints, self.next_wp_index, stop_id)
-            rospy.loginfo("Distance till red light: %f", total_dist)
+            rospy.loginfo("Red light detected, stop line at {}".format(stop_id))
+        elif (stop_id < self.last_stop_id):
+            # Change to no red light
+            self.last_stop_id = stop_id
+            self.acceleration_set = False
+            rospy.loginfo("No red light ahead, ready to accelerate")
+        if stop_id < 0:
+            # Get no stop_id
             starting_v = self.get_waypoint_velocity(self.base_waypoints[self.next_wp_index])
-            rospy.loginfo("Starting velocity: %f", starting_v)
+            # Set acceleration trajectory when if there's no red light ahead
+            if self.max_velocity - starting_v > 0.1 and not self.acceleration_set:
+                avg_accel = 2.
+                fn_s, fn_v, T = self.generate_acceleration_trajectory(0., self.max_velocity, avg_accel)
+                wps_id = self.next_wp_index
+                d = 0.
+                while wps_id <= self.base_waypoints[-1]:
+                    d += self.distance(self.base_waypoints, wps_id, wps_id+1)
+                    t = newton_solve(fn_s, fn_v, d, T)
+                    target_v = max(0., min(fn_v(t), self.max_velocity))
+                    if self.max_velocity - target_v > 0.1:
+                        self.set_waypoint_velocity(self.base_waypoints, wps_id, target_v)
+                        wps_id += 1
+                    else:
+                        break
+                self.acceleration_set = True
+                rospy.loginfo("Set accleration trajectory success")
+        else:
+            # Get stop_id
+            id_diff = stop_id - self.next_wp_index
+            if id_diff >= 0 and id_diff < LOOKAHEAD_WPS and not self.deceleration_set:
+                # Calculate distance till next red light
+                total_dist = self.distance(self.base_waypoints, self.next_wp_index, stop_id)
+                rospy.loginfo("Distance till red light: %f", total_dist)
+                starting_v = self.get_waypoint_velocity(self.base_waypoints[self.next_wp_index])
+                rospy.loginfo("Starting velocity: %f", starting_v)
 
-            # Estimate average deceleration
-            #avg_decel = starting_v**2/(2.*total_dist)
-            #rospy.loginfo("Estimated average deceleration: %f", avg_decel)
+                fn_s, fn_v, T = self.generate_fullstop_trajectory(starting_v, total_dist)
 
-            # Estimate how much time it will take to decelerate
-            if (abs(starting_v) < 0.00001):
-                T_est = 2*total_dist / 0.00001
-            else:
-                T_est = 2*total_dist / starting_v
-            # Force vehicle to stop a little bit faster
-            T = T_est * .9
-            # Generate a trajectory
-            start = [0., starting_v, 0.]
-            end = [total_dist, 0., 0.]
-            alphas = JMT(start, end, T)
-            # Test this is actually a good trajectory
-            # Good trajectory            
-            # Get distance and velocity formula
-            fn_s = get_fn_s(alphas)
-            fn_v = get_fn_v(alphas)
-            # Set target velocity for each waypoint till stop line
-            d = 0.
-            for wps_id in range(self.next_wp_index+1, stop_id):
-                d += self.distance(self.base_waypoints, wps_id-1, wps_id)
-                t = newton_solve(fn_s, fn_v, d, T)
-		# Make sure target velocity is between 0 and max_velocity
-                target_v = max(0., min(fn_v(t), self.max_velocity))
-                self.set_waypoint_velocity(self.base_waypoints, wps_id, target_v)
+                # Set target velocity for each waypoint till stop line
+                d = 0.
+                for wps_id in range(self.next_wp_index+1, stop_id): 
+                    d += self.distance(self.base_waypoints, wps_id-1, wps_id)
+                    t = newton_solve(fn_s, fn_v, d, T)
+                    # Make sure target velocity is between 0 and max_velocity
+                    red_factor = ((stop_id*1.0-wps_id)/(stop_id-self.next_wp_index-1))**2.5
+                    target_v = max(0., min(fn_v(t), self.max_velocity)) * red_factor
+                    if target_v < 1.5:
+                        target_v = 0
+                    self.set_waypoint_velocity(self.base_waypoints, wps_id, target_v)
 
-            # Set velocity at the stop line at 0.
-            self.set_waypoint_velocity(self.base_waypoints, stop_id, 0.)
-            self.deceleration_set = True
-            # Set target velocity for waypoints after red light stop line
-            # Not sure this needs to be implemented
+                # Set velocity at the stop line to 0.
+                self.set_waypoint_velocity(self.base_waypoints, stop_id, 0.) 
 
-            # Publish final waypoints
-            self.waypoints_to_pub = self.base_waypoints[self.next_wp_index:self.next_wp_index+LOOKAHEAD_WPS]
-            msg = Lane()
-            msg.waypoints = self.waypoints_to_pub
-            self.final_waypoints_pub.publish(msg)
-            rospy.loginfo("Successfully adjusted velocities for a red light at index %d", stop_id)
-        rospy.loginfo("Red light at index %d not in lookahead range", stop_id)
+                # Set acceleration trajectory after stop line
+                avg_accel = 2.
+                fn_s, fn_v, T = self.generate_acceleration_trajectory(0., self.max_velocity, avg_accel)
+                wps_id = stop_id + 1
+                d = 0.
+                while wps_id <= self.base_waypoints[-1]:
+                    d += self.distance(self.base_waypoints, wps_id-1, wps_id)
+                    t = newton_solve(fn_s, fn_v, d, T)
+                    target_v = max(0., min(fn_v(t), self.max_velocity))
+                    if self.max_velocity - target_v > 0.1:
+                        self.set_waypoint_velocity(self.base_waypoints, wps_id, target_v)
+                        wps_id += 1
+                    else:
+                        break
+                self.deceleration_set = True
+                rospy.loginfo("Set full stop till red light trajectory success")
+        # Publish final waypoints
+        self.waypoints_to_pub = self.base_waypoints[self.next_wp_index:self.next_wp_index+LOOKAHEAD_WPS]
+        msg = Lane()
+        msg.waypoints = self.waypoints_to_pub
+        self.final_waypoints_pub.publish(msg)
+
+    def generate_acceleration_trajectory(self, start_v, end_v, avg_accel):
+        dist_est = abs((end_v**2-start_v**2)/2/avg_accel)
+        T_est = abs((start_v-end_v)/avg_accel)
+        d = 1 * dist_est
+        T = 1 * T_est
+        start = [0., start_v, 0.]
+        end = [d, end_v, 0.]
+        alphas = JMT(start, end, T)
+        fn_s = get_fn_s(alphas)
+        fn_v = get_fn_v(alphas)
+        return fn_s, fn_v, T
+
+    def generate_fullstop_trajectory(self, start_v, d):
+        decel_est = start_v**2 / (2 * d)
+        rospy.loginfo("Estimated average deceleration: {}".format(decel_est))
+        if (abs(start_v) < 0.00001):
+            T_est = 2 * d / 0.00001
+        else:
+            T_est = 2 * d / start_v
+        # Force the car to stop faster
+        T = T_est * 1.
+        decel_forced = start_v / T
+        rospy.loginfo("Forced average deceleration: {}".format(decel_forced))
+        start = [0., start_v, 0.]
+        end = [d, 0., 0.]
+        alphas = JMT(start, end, T)
+        fn_s = get_fn_s(alphas)
+        fn_v = get_fn_v(alphas)
+        return fn_s, fn_v, T
 
     def obstacle_cb(self, msg):
         # TODO: Callback for /obstacle_waypoint message. We will implement it later
